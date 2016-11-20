@@ -11,6 +11,7 @@ import "net/rpc"
 import "net"
 import "bufio"
 import "hash/fnv"
+import "sync"
 
 // import "os/exec"
 
@@ -64,7 +65,8 @@ type MapReduce struct {
 	Workers map[string]*WorkerInfo
 
 	// add any additional state here
-	WorkerCount int // count the worker already registered
+	WorkerSum    int // count the worker already registered
+	sync.RWMutex     // for map operation corruency
 }
 
 func InitMapReduce(nmap int, nreduce int,
@@ -80,7 +82,7 @@ func InitMapReduce(nmap int, nreduce int,
 	mr.Workers = make(map[string]*WorkerInfo)
 
 	// initialize any additional state here
-	mr.WorkerCount = 0
+	mr.WorkerSum = 0
 	return mr
 }
 
