@@ -16,6 +16,7 @@ type PutAppendArgs struct {
 
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Operation string
 }
 
 type PutAppendReply struct {
@@ -32,5 +33,22 @@ type GetReply struct {
 	Value string
 }
 
+type InitBackupArgs struct {
+	Db map[string]string
+}
+
+type InitBackupReply struct {
+	Err Err
+}
+
+type ForwardRequestArgs struct {
+	Operation string
+	Key       string
+	Value     string
+}
+
+type ForwardRequestReply struct {
+	Err Err
+}
 
 // Your RPC definitions here.

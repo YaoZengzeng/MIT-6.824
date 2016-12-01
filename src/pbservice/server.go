@@ -12,8 +12,6 @@ import "os"
 import "syscall"
 import "math/rand"
 
-
-
 type PBServer struct {
 	mu         sync.Mutex
 	l          net.Listener
@@ -22,25 +20,86 @@ type PBServer struct {
 	me         string
 	vs         *viewservice.Clerk
 	// Your declarations here.
+	view viewservice.View
+	db   map[string]string
 }
 
-
 func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
-
 	// Your code here.
+	reply.Value = pb.db[args.Key]
+
+	// forward request to backup
+	pb.ForwardRequestPrimary("Get", args.Key, "")
 
 	return nil
 }
-
 
 func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
 
 	// Your code here.
+	if args.Operation == "Put" {
+		pb.db[args.Key] = args.Value
+	} else if args.Operation == "Append" {
+		val := pb.db[args.Key]
+		pb.db[args.Key] = val + args.Value
+	} else {
+		return fmt.Errorf("PBServer PutAppend Operation should only be Put or Append")
+	}
 
+	// forward request to backup
+	pb.ForwardRequestPrimary(args.Operation, args.Key, args.Value)
 
 	return nil
 }
 
+func (pb *PBServer) BackupInitialize(args *InitBackupArgs, reply *InitBackupReply) error {
+	pb.db = args.Db
+
+	return nil
+}
+
+func (pb *PBServer) InitBackup() {
+	args := &InitBackupArgs{
+		Db: pb.db,
+	}
+	var reply InitBackupReply
+
+	ok := call(pb.view.Backup, "PBServer.BackupInitialize", args, &reply)
+	if ok == false {
+		log.Fatal("PBServer InitBackup failed")
+	}
+}
+
+func (pb *PBServer) ForwardRequestBackup(args *ForwardRequestArgs, reply *ForwardRequestReply) error {
+	if args.Operation == "Put" {
+		pb.db[args.Key] = args.Value
+	}
+	if args.Operation == "Append" {
+		val := pb.db[args.Key]
+		pb.db[args.Key] = val + args.Value
+	}
+
+	return nil
+}
+
+func (pb *PBServer) ForwardRequestPrimary(operation string, key string, value string) {
+	// if no backup, just skip
+	if pb.view.Backup == "" {
+		return
+	}
+
+	args := &ForwardRequestArgs{
+		Operation: operation,
+		Key:       key,
+		Value:     value,
+	}
+	var reply ForwardRequestReply
+
+	ok := call(pb.view.Backup, "PBServer.ForwardRequestBackup", args, &reply)
+	if ok == false {
+		log.Fatal("PBServer ForwardRequestPrimary failed")
+	}
+}
 
 //
 // ping the viewserver periodically.
@@ -51,6 +110,21 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 func (pb *PBServer) tick() {
 
 	// Your code here.
+	view, err := pb.vs.Ping(pb.view.Viewnum)
+	if err != nil {
+		log.Fatal("PBServer tick error: %v", err)
+	}
+	oldview := pb.view
+	pb.view = view
+
+	// if view changed, do some operations
+	if oldview.Viewnum != view.Viewnum {
+		// if current server is primary and backup changed, initialize it
+		if pb.me == view.Primary && view.Backup != oldview.Backup && view.Backup != "" {
+			log.Printf("InitBackup being called")
+			pb.InitBackup()
+		}
+	}
 }
 
 // tell the server to shut itself down.
@@ -78,12 +152,12 @@ func (pb *PBServer) isunreliable() bool {
 	return atomic.LoadInt32(&pb.unreliable) != 0
 }
 
-
 func StartServer(vshost string, me string) *PBServer {
 	pb := new(PBServer)
 	pb.me = me
 	pb.vs = viewservice.MakeClerk(me, vshost)
 	// Your pb.* initializations here.
+	pb.db = make(map[string]string)
 
 	rpcs := rpc.NewServer()
 	rpcs.Register(pb)

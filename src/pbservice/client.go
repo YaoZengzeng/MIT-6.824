@@ -7,10 +7,10 @@ import "fmt"
 import "crypto/rand"
 import "math/big"
 
-
 type Clerk struct {
 	vs *viewservice.Clerk
 	// Your declarations here
+	primary string
 }
 
 // this may come in handy.
@@ -28,7 +28,6 @@ func MakeClerk(vshost string, me string) *Clerk {
 
 	return ck
 }
-
 
 //
 // call() sends an RPC to the rpcname handler on server srv
@@ -74,8 +73,31 @@ func call(srv string, rpcname string,
 func (ck *Clerk) Get(key string) string {
 
 	// Your code here.
+	// still don't know who is the primary
+	if ck.primary == "" {
+		v, _ := ck.vs.Get()
+		ck.primary = v.Primary
+	}
 
-	return "???"
+	var reply GetReply
+	var ok bool
+	args := &GetArgs{
+		Key: key,
+	}
+
+retry:
+	ok = call(ck.primary, "PBServer.Get", args, &reply)
+	if ok == false {
+		ck.UpdatePrimary()
+		goto retry
+	}
+
+	if reply.Err != "" {
+		ck.UpdatePrimary()
+		goto retry
+	}
+
+	return reply.Value
 }
 
 //
@@ -84,6 +106,31 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	// Your code here.
+	// still don't know who is the primary
+	if ck.primary == "" {
+		v, _ := ck.vs.Get()
+		ck.primary = v.Primary
+	}
+
+retry:
+	args := &PutAppendArgs{
+		Key:       key,
+		Value:     value,
+		Operation: op,
+	}
+	var reply PutAppendReply
+
+	ok := call(ck.primary, "PBServer.PutAppend", args, &reply)
+	if ok == false {
+		ck.UpdatePrimary()
+		goto retry
+	}
+
+	if reply.Err != "" {
+		ck.UpdatePrimary()
+		goto retry
+	}
+
 }
 
 //
@@ -100,4 +147,10 @@ func (ck *Clerk) Put(key string, value string) {
 //
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
+}
+
+// used for clerk to update primary
+func (ck *Clerk) UpdatePrimary() {
+	v, _ := ck.vs.Get()
+	ck.primary = v.Primary
 }
