@@ -212,6 +212,25 @@ func (vs *ViewServer) tick() {
 			}
 			vs.ack = false
 		}
+
+		// backup timeout, if current view acked, directly to next view
+		if now.Sub(vs.servers[vs.cv.Backup]) > DeadPings*PingInterval {
+			op := vs.cv.Primary
+			ob := vs.cv.Backup
+			vs.cv.Viewnum++
+			vs.cv.Backup = ""
+			// choose an idle server as backup
+			for server, t := range vs.servers {
+				if server == op || server == ob {
+					continue
+				}
+				if now.Sub(t) < DeadPings*PingInterval {
+					vs.cv.Backup = server
+					break
+				}
+			}
+			vs.ack = false
+		}
 	} else {
 		// primary timeout
 		if now.Sub(vs.servers[vs.cv.Primary]) > DeadPings*PingInterval {

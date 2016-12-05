@@ -17,6 +17,7 @@ type PutAppendArgs struct {
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
 	Operation string
+	Id        int64
 }
 
 type PutAppendReply struct {
@@ -34,7 +35,8 @@ type GetReply struct {
 }
 
 type InitBackupArgs struct {
-	Db map[string]string
+	Db        map[string]string
+	Duplicate map[int64]bool
 }
 
 type InitBackupReply struct {

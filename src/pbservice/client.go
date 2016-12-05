@@ -112,14 +112,15 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		ck.primary = v.Primary
 	}
 
-retry:
 	args := &PutAppendArgs{
 		Key:       key,
 		Value:     value,
 		Operation: op,
+		Id:        nrand(),
 	}
 	var reply PutAppendReply
 
+retry:
 	ok := call(ck.primary, "PBServer.PutAppend", args, &reply)
 	if ok == false {
 		ck.UpdatePrimary()

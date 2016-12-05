@@ -20,12 +20,16 @@ type PBServer struct {
 	me         string
 	vs         *viewservice.Clerk
 	// Your declarations here.
-	view viewservice.View
-	db   map[string]string
+	view      viewservice.View
+	db        map[string]string
+	duplicate map[int64]bool
 }
 
 func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 	// Your code here.
+	//pb.mu.Lock()
+	//defer pb.mu.Unlock()
+
 	reply.Value = pb.db[args.Key]
 
 	// forward request to backup
@@ -37,6 +41,16 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
 
 	// Your code here.
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+
+	_, ok := pb.duplicate[args.Id]
+	if ok == true {
+		return nil
+	} else {
+		pb.duplicate[args.Id] = true
+	}
+
 	if args.Operation == "Put" {
 		pb.db[args.Key] = args.Value
 	} else if args.Operation == "Append" {
@@ -54,13 +68,18 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 
 func (pb *PBServer) BackupInitialize(args *InitBackupArgs, reply *InitBackupReply) error {
 	pb.db = args.Db
+	pb.duplicate = args.Duplicate
 
 	return nil
 }
 
 func (pb *PBServer) InitBackup() {
+	//pb.mu.Lock()
+	//defer pb.mu.Unlock()
+
 	args := &InitBackupArgs{
-		Db: pb.db,
+		Db:        pb.db,
+		Duplicate: pb.duplicate,
 	}
 	var reply InitBackupReply
 
@@ -71,6 +90,9 @@ func (pb *PBServer) InitBackup() {
 }
 
 func (pb *PBServer) ForwardRequestBackup(args *ForwardRequestArgs, reply *ForwardRequestReply) error {
+	//pb.mu.Lock()
+	//defer pb.mu.Unlock()
+
 	if args.Operation == "Put" {
 		pb.db[args.Key] = args.Value
 	}
@@ -82,10 +104,10 @@ func (pb *PBServer) ForwardRequestBackup(args *ForwardRequestArgs, reply *Forwar
 	return nil
 }
 
-func (pb *PBServer) ForwardRequestPrimary(operation string, key string, value string) {
+func (pb *PBServer) ForwardRequestPrimary(operation string, key string, value string) error {
 	// if no backup, just skip
 	if pb.view.Backup == "" {
-		return
+		return nil
 	}
 
 	args := &ForwardRequestArgs{
@@ -97,8 +119,10 @@ func (pb *PBServer) ForwardRequestPrimary(operation string, key string, value st
 
 	ok := call(pb.view.Backup, "PBServer.ForwardRequestBackup", args, &reply)
 	if ok == false {
-		log.Fatal("PBServer ForwardRequestPrimary failed")
+		fmt.Errorf("PBServer ForwardRequestPrimary failed")
 	}
+
+	return nil
 }
 
 //
@@ -121,7 +145,7 @@ func (pb *PBServer) tick() {
 	if oldview.Viewnum != view.Viewnum {
 		// if current server is primary and backup changed, initialize it
 		if pb.me == view.Primary && view.Backup != oldview.Backup && view.Backup != "" {
-			log.Printf("InitBackup being called")
+			//go pb.InitBackup()
 			pb.InitBackup()
 		}
 	}
@@ -158,6 +182,7 @@ func StartServer(vshost string, me string) *PBServer {
 	pb.vs = viewservice.MakeClerk(me, vshost)
 	// Your pb.* initializations here.
 	pb.db = make(map[string]string)
+	pb.duplicate = make(map[int64]bool)
 
 	rpcs := rpc.NewServer()
 	rpcs.Register(pb)
