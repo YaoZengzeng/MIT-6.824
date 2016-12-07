@@ -169,10 +169,7 @@ retry:
 func (pb *PBServer) tick() {
 
 	// Your code here.
-	view, err := pb.vs.Ping(pb.view.Viewnum)
-	if err != nil {
-		log.Fatal("PBServer tick error: %v", err)
-	}
+	view, _ := pb.vs.Ping(pb.view.Viewnum)
 	oldview := pb.view
 	//pb.mu.Lock()
 	pb.view = view
