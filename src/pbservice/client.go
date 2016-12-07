@@ -79,13 +79,14 @@ func (ck *Clerk) Get(key string) string {
 		ck.primary = v.Primary
 	}
 
-	var reply GetReply
 	var ok bool
 	args := &GetArgs{
-		Key: key,
+		Key:  key,
+		OpId: nrand(),
 	}
 
 retry:
+	var reply GetReply
 	ok = call(ck.primary, "PBServer.Get", args, &reply)
 	if ok == false {
 		ck.UpdatePrimary()
@@ -116,11 +117,11 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		Key:       key,
 		Value:     value,
 		Operation: op,
-		Id:        nrand(),
+		OpId:      nrand(),
 	}
-	var reply PutAppendReply
 
 retry:
+	var reply PutAppendReply
 	ok := call(ck.primary, "PBServer.PutAppend", args, &reply)
 	if ok == false {
 		ck.UpdatePrimary()

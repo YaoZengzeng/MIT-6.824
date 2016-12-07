@@ -17,7 +17,7 @@ type PutAppendArgs struct {
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
 	Operation string
-	Id        int64
+	OpId      int64 // unique ID for every operation
 }
 
 type PutAppendReply struct {
@@ -27,6 +27,7 @@ type PutAppendReply struct {
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
+	OpId int64 // unique ID for every operation
 }
 
 type GetReply struct {
@@ -45,6 +46,7 @@ type InitBackupReply struct {
 
 type ForwardRequestArgs struct {
 	Operation string
+	OpId      int64
 	Key       string
 	Value     string
 }

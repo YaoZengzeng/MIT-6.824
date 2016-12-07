@@ -11,6 +11,7 @@ import "sync/atomic"
 import "os"
 import "syscall"
 import "math/rand"
+import "errors"
 
 type PBServer struct {
 	mu         sync.Mutex
@@ -27,15 +28,19 @@ type PBServer struct {
 
 func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 	// Your code here.
-	//pb.mu.Lock()
-	//defer pb.mu.Unlock()
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+
+	// The server isn't the active primary
+	if pb.me != pb.view.Primary {
+		reply.Err = "client request nonprimary"
+		return nil
+	}
 
 	reply.Value = pb.db[args.Key]
 
 	// forward request to backup
-	pb.ForwardRequestPrimary("Get", args.Key, "")
-
-	return nil
+	return pb.ForwardRequestPrimary("Get", args.Key, "", args.OpId)
 }
 
 func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
@@ -44,11 +49,17 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 	pb.mu.Lock()
 	defer pb.mu.Unlock()
 
-	_, ok := pb.duplicate[args.Id]
+	// The server isn't the active primary
+	if pb.me != pb.view.Primary {
+		reply.Err = "client request nonprimary"
+		return nil
+	}
+
+	_, ok := pb.duplicate[args.OpId]
 	if ok == true {
 		return nil
 	} else {
-		pb.duplicate[args.Id] = true
+		pb.duplicate[args.OpId] = true
 	}
 
 	if args.Operation == "Put" {
@@ -57,16 +68,22 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 		val := pb.db[args.Key]
 		pb.db[args.Key] = val + args.Value
 	} else {
-		return fmt.Errorf("PBServer PutAppend Operation should only be Put or Append")
+		return errors.New("PBServer PutAppend Operation should only be Put or Append")
 	}
 
 	// forward request to backup
-	pb.ForwardRequestPrimary(args.Operation, args.Key, args.Value)
-
-	return nil
+	return pb.ForwardRequestPrimary(args.Operation, args.Key, args.Value, args.OpId)
 }
 
 func (pb *PBServer) BackupInitialize(args *InitBackupArgs, reply *InitBackupReply) error {
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+
+	/*	if pb.me != pb.view.Backup {
+		reply.Err = "BackupInitialize: primary view is out of date, no longer backup"
+		return nil
+	}*/
+
 	pb.db = args.Db
 	pb.duplicate = args.Duplicate
 
@@ -74,24 +91,37 @@ func (pb *PBServer) BackupInitialize(args *InitBackupArgs, reply *InitBackupRepl
 }
 
 func (pb *PBServer) InitBackup() {
-	//pb.mu.Lock()
-	//defer pb.mu.Unlock()
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
 
 	args := &InitBackupArgs{
 		Db:        pb.db,
 		Duplicate: pb.duplicate,
 	}
+retry:
 	var reply InitBackupReply
 
 	ok := call(pb.view.Backup, "PBServer.BackupInitialize", args, &reply)
 	if ok == false {
-		log.Fatal("PBServer InitBackup failed")
+		goto retry
 	}
 }
 
 func (pb *PBServer) ForwardRequestBackup(args *ForwardRequestArgs, reply *ForwardRequestReply) error {
-	//pb.mu.Lock()
-	//defer pb.mu.Unlock()
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+
+	if pb.me == pb.view.Primary {
+		reply.Err = "ForwardRequestBackup: primary view is out of date, no longer backup"
+		return nil
+	}
+
+	_, ok := pb.duplicate[args.OpId]
+	if ok == true {
+		return nil
+	} else {
+		pb.duplicate[args.OpId] = true
+	}
 
 	if args.Operation == "Put" {
 		pb.db[args.Key] = args.Value
@@ -104,22 +134,27 @@ func (pb *PBServer) ForwardRequestBackup(args *ForwardRequestArgs, reply *Forwar
 	return nil
 }
 
-func (pb *PBServer) ForwardRequestPrimary(operation string, key string, value string) error {
+func (pb *PBServer) ForwardRequestPrimary(operation string, key string, value string, OpId int64) error {
+	args := &ForwardRequestArgs{
+		Operation: operation,
+		OpId:      OpId,
+		Key:       key,
+		Value:     value,
+	}
+retry:
+	var reply ForwardRequestReply
 	// if no backup, just skip
 	if pb.view.Backup == "" {
 		return nil
 	}
 
-	args := &ForwardRequestArgs{
-		Operation: operation,
-		Key:       key,
-		Value:     value,
-	}
-	var reply ForwardRequestReply
-
 	ok := call(pb.view.Backup, "PBServer.ForwardRequestBackup", args, &reply)
 	if ok == false {
-		fmt.Errorf("PBServer ForwardRequestPrimary failed")
+		goto retry
+	}
+
+	if reply.Err != "" {
+		return errors.New(string(reply.Err))
 	}
 
 	return nil
@@ -139,14 +174,16 @@ func (pb *PBServer) tick() {
 		log.Fatal("PBServer tick error: %v", err)
 	}
 	oldview := pb.view
+	//pb.mu.Lock()
 	pb.view = view
+	//pb.mu.Unlock()
 
 	// if view changed, do some operations
 	if oldview.Viewnum != view.Viewnum {
 		// if current server is primary and backup changed, initialize it
 		if pb.me == view.Primary && view.Backup != oldview.Backup && view.Backup != "" {
-			//go pb.InitBackup()
-			pb.InitBackup()
+			go pb.InitBackup()
+			//pb.InitBackup()
 		}
 	}
 }
