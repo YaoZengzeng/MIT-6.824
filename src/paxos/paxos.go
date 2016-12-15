@@ -46,6 +46,10 @@ const (
 type PrepareArgs struct {
 	Seq    int
 	Number int
+
+	// the follow used for Min()
+	Index  int
+	Done   int
 }
 
 type PrepareReply struct {
@@ -59,11 +63,28 @@ type AcceptArgs struct {
 	Seq    int
 	Number int
 	Value  interface{}
+
+	// the follow used for Min()
+	Index  int
+	Done   int
 }
 
 type AcceptReply struct {
 	Ok         bool
 	HighestNum int
+}
+
+type LearnArgs struct {
+	Seq 	int
+
+	// the follow used for Min()
+	Index 	int
+	Done 	int
+}
+
+type LearnReply struct {
+	Status 	Fate
+	Value 	interface{}
 }
 
 type acceptState struct {
@@ -84,7 +105,9 @@ type Paxos struct {
 
 	// Your data here.
 	instances map[int]*acceptState
+	done 	  map[int]int
 	max       int // highest instance sequence known to this peer
+	min 	  int // the max instance that could be forgotten
 }
 
 //
@@ -137,28 +160,41 @@ func (px *Paxos) Start(seq int, v interface{}) {
 
 func (px *Paxos) proposer(seq int, v interface{}) {
 	n := 1
-	for {
+
+	// if the instance has been forgotten, just return
+	if seq <= px.min {
+		return
+	}
+
+	for !px.learn(seq) {
 		count := 0
 		nt := n
-		v1 := v
+		rn := 0	// rn is the highest number in the peer whcih value is not nil
 		for i := 0; i < len(px.peers); i++ {
 			reply, _ := px.prepare(i, nt, seq)
 			if reply.Ok {
 				count++
+				if reply.Value != nil && reply.HighestNum > rn {
+					v = reply.Value
+					rn = reply.HighestNum
+				}
 			} else {
-				if reply.HighestNum > n {
+				if reply.HighestNum >= n {
 					n = reply.HighestNum + 1
-					v1 = reply.Value
+					if reply.Value != nil && reply.HighestNum > rn {
+						v = reply.Value
+						rn = reply.HighestNum
+					}
 				}
 			}
 		}
-		// set majority equal to all temporarily
-		if count != len(px.peers) {
+		// wait for majority in agreement
+		if count < (len(px.peers)/2+1) {
 			continue
 		}
 		count = 0
 		for i := 0; i < len(px.peers); i++ {
-			reply, _ := px.accept(i, nt, seq, v1)
+			reply, _ := px.accept(i, nt, seq, v)
 			if reply.Ok {
 				count++
 			} else {
@@ -166,13 +202,67 @@ func (px *Paxos) proposer(seq int, v interface{}) {
 			}
 		}
 
-		// set majority equal to all temporarily
-		if count != len(px.peers) {
+		// wait for majority in agreement
+		if count < (len(px.peers)/2+1) {
 			continue
 		} else {
 			break
 		}
 	}
+}
+
+func (px *Paxos) learn(seq int) bool {
+	args := &LearnArgs{}
+	args.Seq = seq
+	args.Index = px.me
+	args.Done = px.done[px.me]
+	var reply LearnReply
+
+	count := 0
+	var v interface{}
+	for i := 0; i < len(px.peers); i++ {
+		if i == px.me {
+			px.LearnHandler(args, &reply)
+		} else {
+			ok := call(px.peers[i], "Paxos.LearnHandler", args, &reply)
+			// pass the unavailable peers
+			if ok == false {
+				continue
+			}
+		}
+		if reply.Status == Decided {
+			// not in agreement
+			if count > 0 && v != reply.Value {
+				return false
+			}
+			count ++
+			v = reply.Value
+		} else {
+			return false
+		}
+	}
+
+	// if all the status proposer get is Decided and have the same value, return true
+	return true
+}
+
+func (px *Paxos) LearnHandler(args *LearnArgs, reply *LearnReply) error {
+	px.mu.Lock()
+	defer px.mu.Unlock()
+
+	if args.Done > px.done[args.Index] {
+		px.done[args.Index] = args.Done
+	}
+
+	if _, ok := px.instances[args.Seq]; ok == false {
+		reply.Status = Pending
+		return nil
+	}
+
+	reply.Status = px.instances[args.Seq].status
+	reply.Value = px.instances[args.Seq].v_a
+
+	return nil
 }
 
 func (px *Paxos) accept(i int, number int, seq int, v interface{}) (AcceptReply, error) {
@@ -181,7 +271,17 @@ func (px *Paxos) accept(i int, number int, seq int, v interface{}) (AcceptReply,
 	args.Seq = seq
 	args.Number = number
 	args.Value = v
+
+	args.Index = px.me
+	args.Done = px.done[px.me]
 	var reply AcceptReply
+
+	// in order to pass tests assuming unreliable network,
+	// paxos should call the local acceptor through a function rather than RPC
+	if i == px.me {
+		err := px.AcceptHandler(args, &reply)
+		return reply, err
+	}
 
 	// send an RPC request, wait for the reply
 	ok := call(px.peers[i], "Paxos.AcceptHandler", args, &reply)
@@ -195,6 +295,16 @@ func (px *Paxos) accept(i int, number int, seq int, v interface{}) (AcceptReply,
 func (px *Paxos) AcceptHandler(args *AcceptArgs, reply *AcceptReply) error {
 	px.mu.Lock()
 	defer px.mu.Unlock()
+
+	if args.Done > px.done[args.Index] {
+		px.done[args.Index] = args.Done
+	}
+
+	// if the acceptor have not get any prepare request
+	// just accept it, because the proposer must have get the majority
+	if _, ok := px.instances[args.Seq]; ok != true {
+		px.instances[args.Seq] = &acceptState{}
+	}
 
 	if args.Number >= px.instances[args.Seq].n_p {
 		px.instances[args.Seq].n_p = args.Number
@@ -215,7 +325,17 @@ func (px *Paxos) prepare(i int, number int, seq int) (PrepareReply, error) {
 	args := &PrepareArgs{}
 	args.Seq = seq
 	args.Number = number
+
+	args.Index = px.me
+	args.Done = px.done[px.me]
 	var reply PrepareReply
+
+	// in order to pass tests assuming unreliable network,
+	// paxos should call the local acceptor through a function rather than RPC
+	if i == px.me {
+		err := px.PrepareHandler(args, &reply)
+		return reply, err
+	}
 
 	// send an RPC request, wait for the reply
 	ok := call(px.peers[i], "Paxos.PrepareHandler", args, &reply)
@@ -229,6 +349,10 @@ func (px *Paxos) prepare(i int, number int, seq int) (PrepareReply, error) {
 func (px *Paxos) PrepareHandler(args *PrepareArgs, reply *PrepareReply) error {
 	px.mu.Lock()
 	defer px.mu.Unlock()
+
+	if args.Done > px.done[args.Index] {
+		px.done[args.Index] = args.Done
+	}
 
 	if _, ok := px.instances[args.Seq]; ok != true {
 		i := &acceptState{
@@ -265,6 +389,10 @@ func (px *Paxos) PrepareHandler(args *PrepareArgs, reply *PrepareReply) error {
 //
 func (px *Paxos) Done(seq int) {
 	// Your code here.
+	px.mu.Lock()
+	defer px.mu.Unlock()
+
+	px.done[px.me] = seq
 }
 
 //
@@ -274,6 +402,9 @@ func (px *Paxos) Done(seq int) {
 //
 func (px *Paxos) Max() int {
 	// Your code here.
+	px.mu.Lock()
+	defer px.mu.Unlock()
+
 	return px.max
 }
 
@@ -307,7 +438,32 @@ func (px *Paxos) Max() int {
 //
 func (px *Paxos) Min() int {
 	// You code here.
-	return 0
+	px.mu.Lock()
+	defer px.mu.Unlock()
+
+	min := px.done[0]
+	for i := 1; i < len(px.done); i++ {
+		if px.done[i] < min {
+			min = px.done[i]
+		}
+	}
+
+	if min > px.min {
+		var oldMin int
+		if px.min == -1 {
+			oldMin = 0
+		} else {
+			oldMin = px.min
+		}
+		px.min = min
+
+		// free the the information of old instances
+		for i := oldMin ; i <= px.min ; i++ {
+			delete(px.instances, i)
+		}
+	}
+
+	return px.min + 1
 }
 
 //
@@ -321,6 +477,12 @@ func (px *Paxos) Status(seq int) (Fate, interface{}) {
 	// Your code here.
 	px.mu.Lock()
 	defer px.mu.Unlock()
+
+	// the instance has been forgotten
+	if seq <= px.min {
+		return Forgotten, nil
+	}
+
 	if _, ok := px.instances[seq]; ok {
 		return px.instances[seq].status, px.instances[seq].v_a
 	}
@@ -372,7 +534,13 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
 
 	// Your initialization code here.
 	px.instances = make(map[int]*acceptState)
+	px.done = make(map[int]int)
 	px.max = -1
+	px.min = -1
+
+	for i := 0; i < len(px.peers); i++ {
+		px.done[i] = -1
+	}
 
 	if rpcs != nil {
 		// caller will create socket &c
