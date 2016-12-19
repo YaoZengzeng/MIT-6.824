@@ -71,7 +71,6 @@ type AcceptArgs struct {
 
 type AcceptReply struct {
 	Ok         bool
-	HighestNum int
 }
 
 type LearnArgs struct {
@@ -85,6 +84,18 @@ type LearnArgs struct {
 type LearnReply struct {
 	Status 	Fate
 	Value 	interface{}
+}
+
+type DecidedArgs struct {
+	Seq 	int
+	Value 	interface{}
+
+	// the follow used for Min()
+	Index 	int
+	Done 	int
+}
+
+type DecidedReply struct {
 }
 
 type acceptState struct {
@@ -187,7 +198,19 @@ func (px *Paxos) proposer(seq int, v interface{}) {
 					}
 				}
 			}
+			if reply.Status == Decided {
+				args := &DecidedArgs{}
+				args.Seq = seq
+				args.Value = reply.Value
+				args.Index = px.me
+				args.Done = px.done[px.me]
+				var reply DecidedReply
+
+				px.DecidedHandler(args, &reply)
+				goto end;
+			}
 		}
+
 		// wait for majority in agreement
 		if count < (len(px.peers)/2+1) {
 			continue
@@ -197,8 +220,6 @@ func (px *Paxos) proposer(seq int, v interface{}) {
 			reply, _ := px.accept(i, nt, seq, v)
 			if reply.Ok {
 				count++
-			} else {
-				n = reply.HighestNum + 1
 			}
 		}
 
@@ -206,9 +227,54 @@ func (px *Paxos) proposer(seq int, v interface{}) {
 		if count < (len(px.peers)/2+1) {
 			continue
 		} else {
-			break
+			// set all peers' status to be Decided
+			for i := 0; i < len(px.peers); i++ {
+				px.decided(i, seq, v)
+			}
 		}
 	}
+
+end:
+	return
+}
+
+func (px *Paxos) decided(i int, seq int, v interface{}) {
+	args := &DecidedArgs{}
+	args.Seq = seq
+	args.Value = v
+	args.Index = px.me
+	args.Done = px.done[px.me]
+	var reply DecidedReply
+
+	if i == px.me {
+		px.DecidedHandler(args, &reply)
+		return
+	}
+
+	call(px.peers[i], "Paxos.DecidedHandler", args, &reply)
+
+	return
+}
+
+func (px *Paxos) DecidedHandler(args *DecidedArgs, reply *DecidedReply) error {
+	px.mu.Lock()
+	defer px.mu.Unlock()
+
+	if _, ok := px.instances[args.Seq]; ok == false {
+		px.instances[args.Seq] = &acceptState{}
+		px.instances[args.Seq].status = Pending
+	}
+
+	// never decide twice
+	if px.instances[args.Seq].status == Decided {
+		fmt.Printf("never decide twice, paxos %d, seq %d\n", px.me, args.Seq)
+		return nil
+	}
+
+	px.instances[args.Seq].v_a = args.Value
+	px.instances[args.Seq].status = Decided
+
+	return nil
 }
 
 func (px *Paxos) learn(seq int) bool {
@@ -218,8 +284,14 @@ func (px *Paxos) learn(seq int) bool {
 	args.Done = px.done[px.me]
 	var reply LearnReply
 
-	count := 0
-	var v interface{}
+	px.mu.Lock()
+	_, ok := px.instances[seq]
+	if ok == true && px.instances[seq].status == Decided {
+		px.mu.Unlock()
+		return true
+	}
+	px.mu.Unlock()
+
 	for i := 0; i < len(px.peers); i++ {
 		if i == px.me {
 			px.LearnHandler(args, &reply)
@@ -230,20 +302,21 @@ func (px *Paxos) learn(seq int) bool {
 				continue
 			}
 		}
+		// if there is a peer's status has been decided, then set it self decided and return
 		if reply.Status == Decided {
-			// not in agreement
-			if count > 0 && v != reply.Value {
-				return false
-			}
-			count ++
-			v = reply.Value
-		} else {
-			return false
+			args := &DecidedArgs{}
+			args.Seq = seq
+			args.Value = reply.Value
+			args.Index = px.me
+			args.Done = px.done[px.me]
+			var reply DecidedReply
+
+			px.DecidedHandler(args, &reply)
+			return true
 		}
 	}
 
-	// if all the status proposer get is Decided and have the same value, return true
-	return true
+	return false
 }
 
 func (px *Paxos) LearnHandler(args *LearnArgs, reply *LearnReply) error {
@@ -304,17 +377,16 @@ func (px *Paxos) AcceptHandler(args *AcceptArgs, reply *AcceptReply) error {
 	// just accept it, because the proposer must have get the majority
 	if _, ok := px.instances[args.Seq]; ok != true {
 		px.instances[args.Seq] = &acceptState{}
+		px.instances[args.Seq].status = Pending
 	}
 
-	if args.Number >= px.instances[args.Seq].n_p {
+	if args.Number < px.instances[args.Seq].n_p || px.instances[args.Seq].status == Decided {
+		reply.Ok = false
+	} else {
 		px.instances[args.Seq].n_p = args.Number
 		px.instances[args.Seq].n_a = args.Number
 		px.instances[args.Seq].v_a = args.Value
-		px.instances[args.Seq].status = Decided
 		reply.Ok = true
-	} else {
-		reply.Ok = false
-		reply.HighestNum = px.instances[args.Seq].n_p
 	}
 
 	return nil
@@ -361,6 +433,7 @@ func (px *Paxos) PrepareHandler(args *PrepareArgs, reply *PrepareReply) error {
 		}
 		px.instances[args.Seq] = i
 		reply.Ok = true
+		reply.Status = px.instances[args.Seq].status
 		if args.Seq > px.max {
 			px.max = args.Seq
 		}
@@ -370,6 +443,9 @@ func (px *Paxos) PrepareHandler(args *PrepareArgs, reply *PrepareReply) error {
 	if args.Number > px.instances[args.Seq].n_p {
 		px.instances[args.Seq].n_p = args.Number
 		reply.Ok = true
+		reply.HighestNum = px.instances[args.Seq].n_p
+		reply.Status = px.instances[args.Seq].status
+		reply.Value = px.instances[args.Seq].v_a
 		return nil
 	} else {
 		reply.Ok = false
