@@ -48,8 +48,8 @@ type PrepareArgs struct {
 	Number int
 
 	// the follow used for Min()
-	Index  int
-	Done   int
+	Index int
+	Done  int
 }
 
 type PrepareReply struct {
@@ -65,34 +65,34 @@ type AcceptArgs struct {
 	Value  interface{}
 
 	// the follow used for Min()
-	Index  int
-	Done   int
+	Index int
+	Done  int
 }
 
 type AcceptReply struct {
-	Ok         bool
+	Ok bool
 }
 
 type LearnArgs struct {
-	Seq 	int
+	Seq int
 
 	// the follow used for Min()
-	Index 	int
-	Done 	int
+	Index int
+	Done  int
 }
 
 type LearnReply struct {
-	Status 	Fate
-	Value 	interface{}
+	Status Fate
+	Value  interface{}
 }
 
 type DecidedArgs struct {
-	Seq 	int
-	Value 	interface{}
+	Seq   int
+	Value interface{}
 
 	// the follow used for Min()
-	Index 	int
-	Done 	int
+	Index int
+	Done  int
 }
 
 type DecidedReply struct {
@@ -116,9 +116,9 @@ type Paxos struct {
 
 	// Your data here.
 	instances map[int]*acceptState
-	done 	  map[int]int
+	done      map[int]int
 	max       int // highest instance sequence known to this peer
-	min 	  int // the max instance that could be forgotten
+	min       int // the max instance that could be forgotten
 }
 
 //
@@ -180,7 +180,7 @@ func (px *Paxos) proposer(seq int, v interface{}) {
 	for !px.learn(seq) {
 		count := 0
 		nt := n
-		rn := 0	// rn is the highest number in the peer whcih value is not nil
+		rn := 0 // rn is the highest number in the peer whcih value is not nil
 		for i := 0; i < len(px.peers); i++ {
 			reply, _ := px.prepare(i, nt, seq)
 			if reply.Ok {
@@ -198,21 +198,18 @@ func (px *Paxos) proposer(seq int, v interface{}) {
 					}
 				}
 			}
+			// if there is peer's status is Decided, then just broadcast it
 			if reply.Status == Decided {
-				args := &DecidedArgs{}
-				args.Seq = seq
-				args.Value = reply.Value
-				args.Index = px.me
-				args.Done = px.done[px.me]
-				var reply DecidedReply
-
-				px.DecidedHandler(args, &reply)
-				goto end;
+				// not enable jumping into if block
+				for i := 0; i < len(px.peers); i++ {
+					px.decided(i, seq, reply.Value)
+				}
+				continue
 			}
 		}
 
 		// wait for majority in agreement
-		if count < (len(px.peers)/2+1) {
+		if count < (len(px.peers)/2 + 1) {
 			continue
 		}
 		count = 0
@@ -224,7 +221,7 @@ func (px *Paxos) proposer(seq int, v interface{}) {
 		}
 
 		// wait for majority in agreement
-		if count < (len(px.peers)/2+1) {
+		if count < (len(px.peers)/2 + 1) {
 			continue
 		} else {
 			// set all peers' status to be Decided
@@ -234,7 +231,6 @@ func (px *Paxos) proposer(seq int, v interface{}) {
 		}
 	}
 
-end:
 	return
 }
 
@@ -284,14 +280,6 @@ func (px *Paxos) learn(seq int) bool {
 	args.Done = px.done[px.me]
 	var reply LearnReply
 
-	px.mu.Lock()
-	_, ok := px.instances[seq]
-	if ok == true && px.instances[seq].status == Decided {
-		px.mu.Unlock()
-		return true
-	}
-	px.mu.Unlock()
-
 	for i := 0; i < len(px.peers); i++ {
 		if i == px.me {
 			px.LearnHandler(args, &reply)
@@ -302,21 +290,13 @@ func (px *Paxos) learn(seq int) bool {
 				continue
 			}
 		}
-		// if there is a peer's status has been decided, then set it self decided and return
-		if reply.Status == Decided {
-			args := &DecidedArgs{}
-			args.Seq = seq
-			args.Value = reply.Value
-			args.Index = px.me
-			args.Done = px.done[px.me]
-			var reply DecidedReply
-
-			px.DecidedHandler(args, &reply)
-			return true
+		// if there is still a peer's status has not been decided, return false
+		if reply.Status != Decided {
+			return false
 		}
 	}
 
-	return false
+	return true
 }
 
 func (px *Paxos) LearnHandler(args *LearnArgs, reply *LearnReply) error {
@@ -534,7 +514,7 @@ func (px *Paxos) Min() int {
 		px.min = min
 
 		// free the the information of old instances
-		for i := oldMin ; i <= px.min ; i++ {
+		for i := oldMin; i <= px.min; i++ {
 			delete(px.instances, i)
 		}
 	}
